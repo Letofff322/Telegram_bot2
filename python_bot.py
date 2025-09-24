@@ -7,11 +7,11 @@ from telegram.ext import Application, MessageHandler, filters, CallbackContext
 from pydub import AudioSegment
 
 
-TOKEN = ''
+TOKEN = os.getenv('TOKEN')
 
 def transcribe_audio(file_path):
     recognizer = sr.Recognizer()
-    temp_wav = None
+    temp_wav = Nonegit status
     try:
         
         audio = AudioSegment.from_file(file_path)
