@@ -3,13 +3,14 @@ import tempfile
 import uuid
 import speech_recognition as sr
 from pydub import AudioSegment
-from aiogram import Bot, Dispatcher, types, executor
+from aiogram import Bot, Dispatcher, types
+from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
 
-TOKEN = "Token"  
-bot = Bot(token=TOKEN)
-dp = Dispatcher(bot)
+TOKEN = "ВАШ_ТОКЕН_ОТ_BOTFATHER"  # Вставь токен от @BotFather
+bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+dp = Dispatcher()
 
-# Функция для транскрипции аудио
 def transcribe_audio(file_path):
     recognizer = sr.Recognizer()
     temp_wav = None
@@ -37,8 +38,7 @@ def transcribe_audio(file_path):
                 except PermissionError:
                     print(f"Не удалось удалить {temp_file}")
 
-# Хендлер для голосовых сообщений
-@dp.message_handler(content_types=['voice'])
+@dp.message_handler(content_types=types.ContentType.VOICE)
 async def handle_voice(message: types.Message):
     file = await bot.get_file(message.voice.file_id)
     unique_id = str(uuid.uuid4())
@@ -48,8 +48,7 @@ async def handle_voice(message: types.Message):
     text = transcribe_audio(file_path)
     await message.reply(f"Расшифровка: {text}")
 
-# Хендлер для видео-кружочков
-@dp.message_handler(content_types=['video_note'])
+@dp.message_handler(content_types=types.ContentType.VIDEO_NOTE)
 async def handle_video_note(message: types.Message):
     file = await bot.get_file(message.video_note.file_id)
     unique_id = str(uuid.uuid4())
@@ -59,6 +58,10 @@ async def handle_video_note(message: types.Message):
     text = transcribe_audio(file_path)
     await message.reply(f"Расшифровка: {text}")
 
+async def main():
+    dp.startup.register(lambda: print("Бот запущен! Отправь голосовое или кружочек."))
+    await dp.start_polling(bot, skip_updates=True)
+
 if __name__ == '__main__':
-    print("Бот запущен! Отправь голосовое или кружочек.")
-    executor.start_polling(dp, skip_updates=True)
+    import asyncio
+    asyncio.run(main())
