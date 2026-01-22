@@ -4,13 +4,14 @@ import uuid
 import asyncio
 import random
 import logging
+import subprocess
+from pathlib import Path
 
-# Библиотеки для работы с медиа
 import speech_recognition as sr
 from pydub import AudioSegment
 from dotenv import load_dotenv
+import yt_dlp
 
-# Компоненты aiogram
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.types import (
@@ -18,120 +19,180 @@ from aiogram.types import (
     InlineQuery,
     InlineQueryResultArticle,
     InputTextMessageContent,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
 )
 from aiogram.client.default import DefaultBotProperties
 
 
-logging.basicConfig(level=logging.INFO)
+# -------------------- НАСТРОЙКИ --------------------
+
+BASE_DIR = Path(__file__).parent
+LOG_FILE = BASE_DIR / "bot_debug.log"
+DEBUG_DIR = BASE_DIR / "debug_audios"
+DOWNLOAD_DIR = BASE_DIR / "downloads"
+
+DEBUG_DIR.mkdir(exist_ok=True)
+DOWNLOAD_DIR.mkdir(exist_ok=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler()]
+)
+
+
+def check_ffmpeg():
+    try:
+        subprocess.run(["ffmpeg", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        logging.error("ffmpeg не найден")
+
+
+check_ffmpeg()
 load_dotenv()
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-
-if not TELEGRAM_BOT_TOKEN:
-    raise ValueError("Не найден токен Telegram. Укажите его в файле .env под именем TELEGRAM_BOT_TOKEN")
-
-bot = Bot(token=TELEGRAM_BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
+# -------------------- ХРАНИЛИЩЕ --------------------
+
+VIDEO_REQUESTS: dict[int, str] = {}
+
+# -------------------- УТИЛИТЫ --------------------
 
 def generate_prediction() -> str:
-    """Возвращает случайное предсказание из файла predictions.txt."""
     try:
-        with open('predictions.txt', 'r', encoding='utf-8') as f:
-            predictions = [line.strip() for line in f if line.strip()]
-        if not predictions:
-            return "Файл с предсказаниями пуст."
-        return random.choice(predictions)
-    except FileNotFoundError:
-        logging.error("Файл 'predictions.txt' не найден. Создайте его рядом с ботом.")
-        return "Не могу найти файл с предсказаниями. Обратитесь к администратору."
-
+        with open("predictions.txt", encoding="utf-8") as f:
+            return random.choice([x.strip() for x in f if x.strip()])
+    except Exception:
+        return "Предсказания временно недоступны."
 
 
 async def transcribe_audio(file_path: str) -> str:
-    """Конвертирует аудио в WAV и распознает речь."""
     recognizer = sr.Recognizer()
-    temp_wav = None
+    tmp = Path(tempfile.gettempdir()) / f"{uuid.uuid4().hex}.wav"
     try:
-        audio = AudioSegment.from_file(file_path)
-        temp_wav = tempfile.mktemp(suffix=".wav")
-        audio.export(temp_wav, format='wav')
-        
-        with sr.AudioFile(temp_wav) as source:
-            audio_data = recognizer.record(source)
-            text = recognizer.recognize_google(audio_data, language='ru-RU')
-            return text
-    except sr.UnknownValueError:
+        AudioSegment.from_file(file_path).export(tmp, format="wav")
+        with sr.AudioFile(str(tmp)) as source:
+            return recognizer.recognize_google(recognizer.record(source), language="ru-RU")
+    except Exception:
         return "Не удалось распознать речь."
-    except sr.RequestError:
-        return "Ошибка API распознавания речи."
-    except Exception as e:
-        logging.error(f"Ошибка обработки аудио: {e}")
-        return "Произошла ошибка при обработке аудио."
     finally:
-        for temp_file in [file_path, temp_wav]:
-            if temp_file and os.path.exists(temp_file):
-                try:
-                    os.remove(temp_file)
-                except Exception as e:
-                    logging.error(f"Не удалось удалить временный файл {temp_file}: {e}")
+        tmp.unlink(missing_ok=True)
 
+
+# -------------------- VIDEO --------------------
+
+def get_available_qualities(url: str) -> list[int]:
+    with yt_dlp.YoutubeDL({"quiet": True}) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    return sorted({
+        f["height"]
+        for f in info.get("formats", [])
+        if f.get("vcodec") != "none" and f.get("height") and f["height"] <= 720
+    })
+
+
+def download_video(url: str, height: int) -> Path:
+    ydl_opts = {
+        "format": f"bestvideo[height={height}]+bestaudio/best",
+        "outtmpl": str(DOWNLOAD_DIR / "%(id)s.%(ext)s"),
+        "merge_output_format": "mp4",
+        "quiet": True,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url)
+        return Path(ydl.prepare_filename(info))
+
+
+# -------------------- ХЕНДЛЕРЫ --------------------
 
 @dp.message(Command("start"))
-async def handle_start(message: Message):
-    """Отвечает на команду /start."""
-    await message.reply("Привет! Сосал?")
+async def start(message: Message):
+    await message.reply("Привет.")
+
 
 @dp.message(F.voice)
-async def handle_voice(message: Message):
-    """Обрабатывает голосовые сообщения."""
-    download_path = tempfile.mktemp(suffix=".ogg")
-    await bot.download(message.voice, destination=download_path)
-    text = await transcribe_audio(download_path)
-    await message.reply(f"<b>Расшифровка:</b>\n\n<i>{text}</i>")
+async def voice(message: Message):
+    path = Path(tempfile.gettempdir()) / f"{uuid.uuid4().hex}.ogg"
+    await bot.download(message.voice, destination=str(path))
+    await message.reply(await transcribe_audio(str(path)))
+    path.unlink(missing_ok=True)
 
-@dp.message(F.video_note)
-async def handle_video_note(message: Message):
-    """Обрабатывает видео-кружочки."""
-    download_path = tempfile.mktemp(suffix=".mp4")
-    await bot.download(message.video_note, destination=download_path)
-    text = await transcribe_audio(download_path)
-    await message.reply(f"<b>Расшифровка кружочка:</b>\n\n<i>{text}</i>")
+
+@dp.message(
+    F.text.contains("tiktok.com")
+    | F.text.contains("youtu")
+    | F.text.contains("instagram.com")
+)
+async def video_link(message: Message):
+    url = message.text.strip()
+    qualities = get_available_qualities(url)
+
+    if not qualities:
+        await message.reply("Не удалось получить форматы.")
+        return
+
+    VIDEO_REQUESTS[message.message_id] = url
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(
+                text=f"{q}p",
+                callback_data=f"dl:{message.message_id}:{q}"
+            ) for q in qualities
+        ]]
+    )
+
+    await message.reply("Выбери качество:", reply_markup=keyboard)
+
+
+@dp.callback_query(F.data.startswith("dl:"))
+async def download_cb(cb: types.CallbackQuery):
+    _, msg_id, height = cb.data.split(":")
+    url = VIDEO_REQUESTS.get(int(msg_id))
+
+    if not url:
+        await cb.answer("Ссылка устарела", show_alert=True)
+        return
+
+    await cb.answer("Скачиваю...")
+
+    try:
+        path = download_video(url, int(height))
+        await cb.message.reply_video(types.FSInputFile(path))
+        path.unlink(missing_ok=True)
+    except Exception as e:
+        logging.exception(e)
+        await cb.message.reply("Ошибка при скачивании.")
+
 
 @dp.inline_query()
-async def handle_inline_query(inline_query: InlineQuery):
-    """Обрабатывает инлайн-запросы для предсказаний."""
-    query_text = inline_query.query
-    user = inline_query.from_user
-    results = []
-
-    if not query_text:
-        user_tag = f"@{user.username}" if user.username else user.first_name
-        prediction = generate_prediction()
-        response_text = f"Предсказание для {user_tag}:\n\n{prediction}"
-        input_content = InputTextMessageContent(message_text=response_text)
-        result = InlineQueryResultArticle(
+async def inline_q(q: InlineQuery):
+    if q.query:
+        return
+    user = q.from_user
+    text = generate_prediction()
+    await q.answer([
+        InlineQueryResultArticle(
             id=str(uuid.uuid4()),
-            title="🔮 Получить предсказание",
-            description="Нажмите, чтобы отправить предсказание в чат.",
-            input_message_content=input_content,
-            thumbnail_url="https://i.imgur.com/s8OQ0dF.png",
+            title="🔮 Предсказание",
+            input_message_content=InputTextMessageContent(
+                message_text=f"{user.first_name}, {text}"
+            )
         )
-        results.append(result)
-
-    await inline_query.answer(results=results, cache_time=1, is_personal=True)
+    ], cache_time=1, is_personal=True)
 
 
-
-async def on_startup():
-    """Выполняется при запуске бота."""
-    print("Бот запущен и готов к работе!")
+# -------------------- START --------------------
 
 async def main():
-    """Основная функция для запуска бота."""
-    dp.startup.register(on_startup)
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     asyncio.run(main())
